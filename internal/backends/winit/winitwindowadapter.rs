@@ -557,18 +557,24 @@ impl WinitWindowAdapter {
                 let window_item = window_item_rc.as_pin_ref();
                 if window_item.always_on_top() {
                     use raw_window_handle::HasWindowHandle as _;
-                    if let raw_window_handle::RawWindowHandle::Win32(handle) = winit_window.window_handle().unwrap().as_raw() {
+                    if let Ok(raw_handle) = winit_window.window_handle()
+                        && let raw_window_handle::RawWindowHandle::Win32(handle) = raw_handle.as_raw()
+                    {
                         use std::os::raw::c_void;
                         use windows::Win32::Foundation::HWND;
-                        use windows::Win32::UI::WindowsAndMessaging::{SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE};
+                        use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE};
 
                         let hwnd = HWND(handle.hwnd.get() as *mut c_void);
-                        let ex_style = WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0;
+                        let current_ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+                        let new_ex_style = current_ex_style | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0;
                         unsafe {
-                            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style as isize);
+                            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex_style as isize);
                         }
                     }
                 }
+            } else {
+                // WindowItem not yet attached (component not instantiated).
+                // Defer to update_window_properties which runs after component attach.
             }
         }
 
@@ -1423,6 +1429,31 @@ impl WindowAdapter for WinitWindowAdapter {
         // (Ubuntu 20.04's window manager always bringing the window to the front on x11)
         if self.window_level.replace(new_window_level) != new_window_level {
             winit_window_or_none.set_window_level(new_window_level);
+        }
+
+        // Apply overlay extended styles (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) for always-on-top windows
+        // if they weren't applied in ensure_window (e.g., WindowItem not yet attached).
+        #[cfg(target_os = "windows")]
+        if window_item.always_on_top() {
+            use raw_window_handle::HasWindowHandle as _;
+            if let Some(winit_window) = self.winit_window()
+                && let Ok(raw_handle) = winit_window.window_handle()
+                && let raw_window_handle::RawWindowHandle::Win32(handle) = raw_handle.as_raw()
+            {
+                use std::os::raw::c_void;
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE};
+
+                let hwnd = HWND(handle.hwnd.get() as *mut c_void);
+                let current_ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+                let desired_ex_style = WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0;
+                if (current_ex_style & desired_ex_style) != desired_ex_style {
+                    let new_ex_style = current_ex_style | desired_ex_style;
+                    unsafe {
+                        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex_style as isize);
+                    }
+                }
+            }
         }
 
         let mut width = window_item.width().get() as f32;
