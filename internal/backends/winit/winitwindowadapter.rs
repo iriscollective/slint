@@ -547,6 +547,31 @@ impl WinitWindowAdapter {
         let winit_window =
             self.renderer.resume(active_event_loop, window_attributes, self.self_weak.clone())?;
 
+        // On Windows, for always-on-top windows, set WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE to prevent
+        // click activation and remove from Alt-Tab/taskbar. This must be done after window creation
+        // but before the first show (visible is still false here).
+        #[cfg(target_os = "windows")]
+        {
+            let runtime_window = WindowInner::from_pub(self.window());
+            if let Some(window_item_rc) = runtime_window.window_item() {
+                let window_item = window_item_rc.as_pin_ref();
+                if window_item.always_on_top() {
+                    use raw_window_handle::HasWindowHandle as _;
+                    if let raw_window_handle::RawWindowHandle::Win32(handle) = winit_window.window_handle().unwrap().as_raw() {
+                        use std::os::raw::c_void;
+                        use windows::Win32::Foundation::HWND;
+                        use windows::Win32::UI::WindowsAndMessaging::{SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE};
+
+                        let hwnd = HWND(handle.hwnd.get() as *mut c_void);
+                        let ex_style = WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0;
+                        unsafe {
+                            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style as isize);
+                        }
+                    }
+                }
+            }
+        }
+
         // Push the host shell's color scheme and accent color to the SlintContext.
         // With `xdg_desktop_settings` the backend-wide portal watcher (spawned in
         // `Backend::bind_context`) is responsible for that; we only echo the
@@ -756,6 +781,13 @@ impl WinitWindowAdapter {
                     .with_active(false);
             }
         };
+
+        #[cfg(target_os = "windows")]
+        {
+            // Don't activate the window by default. Combined with WS_EX_NOACTIVATE (set in ensure_window
+            // for always-on-top windows) this prevents focus stealing on first show.
+            attrs = attrs.with_active(false);
+        }
 
         Ok(attrs)
     }
@@ -990,7 +1022,7 @@ impl WinitWindowAdapter {
         WindowInner::from_pub(self.window()).context().set_color_scheme(scheme);
 
         // Update the menubar theme
-        #[cfg(target_os = "windows")]
+        #[cfg(all(target_os = "windows", muda))]
         if let WinitWindowOrNone::HasWindow {
             window: winit_window,
             muda_adapter: maybe_muda_adapter,
